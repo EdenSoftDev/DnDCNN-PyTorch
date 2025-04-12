@@ -18,7 +18,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser(description="DnCNN")
 parser.add_argument("--preprocess", type=bool, default=False, help='run prepare_data or not')
-parser.add_argument("--batchSize", type=int, default=128, help="Training batch size")
+parser.add_argument("--batchSize", type=int, default=1, help="Training batch size")
 parser.add_argument("--num_of_layers", type=int, default=18, help="Number of total layers")
 parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
 parser.add_argument("--milestone", type=int, default=30, help="When to decay learning rate; should be less than epochs")
@@ -30,6 +30,7 @@ parser.add_argument("--val_noiseL", type=float, default=25, help='noise level us
 opt = parser.parse_args()
 
 def main():
+    print(torch.cuda.is_available())
     # Load dataset
     print('Loading dataset ...\n')
     dataset_train = Dataset(train=True)
@@ -39,7 +40,7 @@ def main():
     # Build model
     net = DndCNN(channels=1, num_of_layers=opt.num_of_layers)
     net.apply(weights_init_kaiming)
-    criterion = nn.MSELoss(size_average=False)
+    criterion = nn.MSELoss(reduction='sum')
     # Move to GPU
     device_ids = [0]
     model = nn.DataParallel(net, device_ids=device_ids).cuda()
@@ -50,7 +51,7 @@ def main():
     writer = SummaryWriter(opt.outf)
     step = 0
     noiseL_B=[0,55] # ingnored when opt.mode=='S'
-    for epoch in tqdm(range(opt.epochs), desc="Training", unit="epoch"):
+    for epoch in range(opt.epochs):
         if epoch < opt.milestone:
             current_lr = opt.lr
         else:
@@ -58,9 +59,8 @@ def main():
         # set learning rate
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr
-        print('learning rate %f' % current_lr)
         # train
-        for i, data in enumerate(loader_train):
+        for i, data in tqdm(enumerate(loader_train), desc='Training', total=len(loader_train)):
             # training step
             model.train()
             model.zero_grad()
@@ -77,9 +77,6 @@ def main():
             imgn_train = img_train + noise
             img_train, imgn_train = Variable(img_train.cuda()), Variable(imgn_train.cuda())
             noise = Variable(noise.cuda())
-
-            # FIXME: seems here in channel worngly become type tensor
-            
             out_train = model(imgn_train)
             loss = criterion(out_train, noise) / (imgn_train.size()[0]*2)
             loss.backward()
@@ -88,8 +85,6 @@ def main():
             model.eval()
             out_train = torch.clamp(imgn_train-model(imgn_train), 0., 1.)
             psnr_train = batch_PSNR(out_train, img_train, 1.)
-            print("[epoch %d][%d/%d] loss: %.4f PSNR_train: %.4f" %
-                (epoch+1, i+1, len(loader_train), loss.item(), psnr_train))
             # if you are using older version of PyTorch, you may need to change loss.item() to loss.data[0]
             if step % 10 == 0:
                 # Log the scalar values
